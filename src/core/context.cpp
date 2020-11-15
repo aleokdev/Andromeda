@@ -2,14 +2,19 @@
 
 #include <phobos/core/vulkan_context.hpp>
 
+#include <assetlib/texture.hpp>
+#include <assetlib/mesh.hpp>
+
 #include <andromeda/assets/texture.hpp>
 #include <andromeda/assets/mesh.hpp>
 #include <andromeda/assets/assets.hpp>
+// #include <andromeda/assets/material.hpp>
+
 #include <andromeda/world/world.hpp>
-#include <andromeda/assets/material.hpp>
+
 #include <andromeda/core/mipmap_gen.hpp>
 #include <andromeda/util/types.hpp>
-#include <andromeda/assets/importers/stb_image.h>
+
 #include <andromeda/components/transform.hpp>
 #include <andromeda/components/mesh_renderer.hpp>
 #include <andromeda/components/static_mesh.hpp>
@@ -17,9 +22,6 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 
-#include <assimp/Importer.hpp>
-#include <assimp/postprocess.h>
-#include <assimp/scene.h>
 
 namespace andromeda {
 
@@ -41,27 +43,37 @@ static uint32_t format_byte_size(vk::Format format) {
 struct TextureLoadInfo {
 	Handle<Texture> handle;
 	std::string path;
-	bool srgb;
 	Context* ctx;
 };
+
+static uint32_t get_full_image_byte_size(uint32_t width, uint32_t height, uint32_t mip_levels, vk::Format format) {
+	// Total amount of pixels
+	uint32_t pixels = 0;
+	for (uint32_t level = 0; level < mip_levels; ++level) {
+		pixels += (width / pow(2, level)) * (height / pow(2, level));
+	}
+	return pixels * format_byte_size(format);
+}
 
 static void do_texture_load(ftl::TaskScheduler* scheduler, TextureLoadInfo load_info) {
 	ph::VulkanContext& vulkan = *load_info.ctx->vulkan;
 
-	int width, height, channels;
-	// Always load image as rgba
-	uint8_t* data = stbi_load(load_info.path.data(), &width, &height, &channels, 4);
+	assetlib::AssetFile file;
+	bool load_success = assetlib::load_binary_file(load_info.path, file);
+	assert(load_success && "Failed to open file");
+	
+	assetlib::TextureInfo info = assetlib::read_texture_info(file);
 
 	Texture texture;
+	vk::Format format = vk::Format::eR8G8B8A8Srgb; // TODO: add colorspace information
 
-	vk::Format format = load_info.srgb ? vk::Format::eR8G8B8A8Srgb : vk::Format::eR8G8B8A8Unorm;
-
-	texture.image = ph::create_image(vulkan, width, height, ph::ImageType::Texture, format, 1, std::log2(std::max(width, height)) + 1);
+	texture.image = ph::create_image(vulkan, info.extents[0], info.extents[1], ph::ImageType::Texture, format, 1, info.mip_levels);
 	// Upload data
-	uint32_t size = width * height * format_byte_size(format);
+	uint32_t size = get_full_image_byte_size(info.extents[0], info.extents[1], info.mip_levels, format);
 	ph::RawBuffer staging = ph::create_buffer(vulkan, size, ph::BufferType::TransferBuffer);
 	std::byte* staging_mem = ph::map_memory(vulkan, staging);
-	std::memcpy(staging_mem, data, size);
+	// Unpack texture directly into staging buffer
+	assetlib::unpack_texture(info, file, staging_mem);
 	ph::unmap_memory(vulkan, staging);
 
 	// We need to know the current thread index to allocate these command buffers from the correct thread
@@ -70,10 +82,8 @@ static void do_texture_load(ftl::TaskScheduler* scheduler, TextureLoadInfo load_
 	// Command buffer recording and execution will happen as follows
 	// 1. Record commands for transfer [TRANSFER QUEUE]
 	// 2. Submit commands to [TRANSFER QUEUE] with signalSemaphore = transfer_done
-	// 3. Record layout transition to TransferSrcOptimal on [GRAPHICS QUEUE]
-	// 4. Record mipmap generation on [GRAPHICS QUEUE] with finalLayout = ShaderReadOnlyOptimal
-	// 5. Submit commands to [GRAPHICS QUEUE] with waitSemaphore = transfer_done and signalFence = mipmap_done
-	// 6. Wait for fence mipmap_done 
+	// 3. Acquire ownership on graphics queue, submit with waitSemaphore = transfer_done and signalFence = complete
+	// 4. Wait for fence complete 
 
 	// 1. Record commands for transfer 
 	vk::CommandBuffer cmd_buf = vulkan.transfer->begin_single_time(thread_index);
@@ -93,42 +103,21 @@ static void do_texture_load(ftl::TaskScheduler* scheduler, TextureLoadInfo load_
 	vk::CommandBuffer gfx_cmd = vulkan.graphics->begin_single_time(thread_index);
 	vulkan.graphics->acquire_ownership(gfx_cmd, texture.image, *vulkan.transfer);
 
-	// Image must be in TransferSrcOptimal when calling generate_mimpmaps
-	vk::ImageMemoryBarrier barrier;
-	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	barrier.image = texture.image.image;
-	barrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-	barrier.newLayout = vk::ImageLayout::eTransferSrcOptimal;
-	barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-	barrier.dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite;
-	barrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
-	barrier.subresourceRange.baseArrayLayer = 0;
-	barrier.subresourceRange.layerCount = texture.image.layers;
-	barrier.subresourceRange.baseMipLevel = 0;
-	barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
-	gfx_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
-		nullptr, nullptr, barrier);
-
-	// 4. Mipmap generation
-	generate_mipmaps(gfx_cmd, texture.image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits::eShaderRead, 
-		vk::PipelineStageFlagBits::eAllGraphics);
-
-	// 5. Submit to graphics queue
-	vk::Fence mipmap_done = vulkan.device.createFence({});
-	vulkan.graphics->end_single_time(gfx_cmd, mipmap_done, vk::PipelineStageFlagBits::eTransfer, transfer_done);
+	// 4. Submit to graphics queue
+	vk::Fence complete = vulkan.device.createFence({});
+	vulkan.graphics->end_single_time(gfx_cmd, complete, vk::PipelineStageFlagBits::eTransfer, transfer_done);
 
 	TaskManager& task_manager = *load_info.ctx->tasks;
 	task_manager.wait_task(
 		// Polling function. This function polls the fence
-		[mipmap_done, &vulkan]() -> TaskStatus {
-			vk::Result fence_status = vulkan.device.getFenceStatus(mipmap_done);
+		[complete, &vulkan]() -> TaskStatus {
+			vk::Result fence_status = vulkan.device.getFenceStatus(complete);
 			if (fence_status == vk::Result::eSuccess) { return TaskStatus::Completed; }
 			return TaskStatus::Running;
 		},
 		// Cleanup function for when the polling function returns TaskStatus::Completed
-		[mipmap_done, transfer_done, cmd_buf, thread_index, staging, texture, data, load_info, &vulkan] () mutable -> void {
-			vulkan.device.destroyFence(mipmap_done);
+		[complete, transfer_done, cmd_buf, thread_index, staging, texture, load_info, &vulkan] () mutable -> void {
+			vulkan.device.destroyFence(complete);
 			vulkan.device.destroySemaphore(transfer_done);
 			vulkan.transfer->free_single_time(cmd_buf, thread_index);
 
@@ -141,7 +130,6 @@ static void do_texture_load(ftl::TaskScheduler* scheduler, TextureLoadInfo load_
 			assets::finalize_load(load_info.handle, std::move(texture));
 
 			io::log("Finished load {}", load_info.path);
-			stbi_image_free(data);
 		}
 	);	
 }
@@ -152,42 +140,15 @@ struct MeshLoadInfo {
 	Context* ctx;
 };
 
-static void load_mesh_data(ftl::TaskScheduler* scheduler, MeshLoadInfo& load_info, aiMesh* mesh) {
-	constexpr size_t vtx_size = 3 + 3 + 3 + 2;
-	std::vector<float> verts(mesh->mNumVertices * vtx_size);
-	for (size_t i = 0; i < mesh->mNumVertices; ++i) {
-		size_t const index = i * vtx_size;
-		// Position
-		verts[index] = mesh->mVertices[i].x;
-		verts[index + 1] = mesh->mVertices[i].y;
-		verts[index + 2] = mesh->mVertices[i].z;
-		// Normal
-		verts[index + 3] = mesh->mNormals[i].x;
-		verts[index + 4] = mesh->mNormals[i].y;
-		verts[index + 5] = mesh->mNormals[i].z;
-		// Tangent
-		verts[index + 6] = mesh->mTangents[i].x;
-		verts[index + 7] = mesh->mTangents[i].y;
-		verts[index + 8] = mesh->mTangents[i].z;
-		// TexCoord
-		verts[index + 9] = mesh->mTextureCoords[0][i].x;
-		verts[index + 10] = mesh->mTextureCoords[0][i].y;
-	}
-
-	std::vector<uint32_t> indices;
-	indices.reserve(mesh->mNumFaces * 3);
-	for (size_t i = 0; i < mesh->mNumFaces; ++i) {
-		aiFace const& face = mesh->mFaces[i];
-		for (size_t j = 0; j < face.mNumIndices; ++j) {
-			indices.push_back(face.mIndices[j]);
-		}
-	}
+static void load_mesh_data(ftl::TaskScheduler* scheduler, MeshLoadInfo& load_info, assetlib::MeshInfo const& info, assetlib::AssetFile const& file) {
+	constexpr size_t vtx_size = sizeof(assetlib::PNTV32Vertex) / sizeof(float);
 	
 	Mesh result;
 	ph::VulkanContext& vulkan = *load_info.ctx->vulkan;
-	result.vertices = ph::create_buffer(vulkan, verts.size() * sizeof(float), ph::BufferType::VertexBuffer);
-	result.indices = ph::create_buffer(vulkan, indices.size() * sizeof(uint32_t), ph::BufferType::IndexBuffer);
-	result.indices_size = indices.size();
+	assert(info.index_bits == 32 && "Only 32-bit indices are supported");
+	result.vertices = ph::create_buffer(vulkan, info.vertex_count * sizeof(assetlib::PNTV32Vertex), ph::BufferType::VertexBuffer);
+	result.indices = ph::create_buffer(vulkan, info.index_count * sizeof(uint32_t), ph::BufferType::IndexBuffer);
+	result.indices_size = info.index_count;
 
 	auto fill_staging = [&vulkan](void* data, uint32_t size) -> ph::RawBuffer {
 		ph::RawBuffer staging = ph::create_buffer(vulkan, size, ph::BufferType::TransferBuffer);
@@ -197,15 +158,22 @@ static void load_mesh_data(ftl::TaskScheduler* scheduler, MeshLoadInfo& load_inf
 		return staging;
 	};
 
-	ph::RawBuffer vertex_staging = fill_staging(verts.data(), verts.size() * sizeof(float));
-	ph::RawBuffer index_staging = fill_staging(indices.data(), indices.size() * sizeof(uint32_t));
+	ph::RawBuffer vertex_staging = ph::create_buffer(vulkan, result.vertices.size, ph::BufferType::TransferBuffer);
+	ph::RawBuffer index_staging = ph::create_buffer(vulkan, result.indices.size, ph::BufferType::TransferBuffer);
+
+	std::byte* vtx_mem = ph::map_memory(vulkan, vertex_staging);
+	std::byte* idx_mem = ph::map_memory(vulkan, index_staging);
+	// Unpack mesh directly into staging memory
+	assetlib::unpack_mesh(info, file, vtx_mem, idx_mem);
+	ph::unmap_memory(vulkan, vertex_staging);
+	ph::unmap_memory(vulkan, index_staging);
 
 	// Issue buffer copy commands to transfer queue
 	uint32_t const thread_index = scheduler->GetCurrentThreadIndex();
 	vk::CommandBuffer cmd_buf = vulkan.transfer->begin_single_time(thread_index);
 	
-	ph::copy_buffer(vulkan, cmd_buf, vertex_staging, result.vertices, verts.size() * sizeof(float));
-	ph::copy_buffer(vulkan, cmd_buf, index_staging, result.indices, indices.size() * sizeof(uint32_t));
+	ph::copy_buffer(vulkan, cmd_buf, vertex_staging, result.vertices, result.vertices.size);
+	ph::copy_buffer(vulkan, cmd_buf, index_staging, result.indices, result.indices.size);
 
 	vulkan.transfer->release_ownership(cmd_buf, result.vertices, *vulkan.graphics);
 	vulkan.transfer->release_ownership(cmd_buf, result.indices, *vulkan.graphics);
@@ -243,28 +211,22 @@ static void load_mesh_data(ftl::TaskScheduler* scheduler, MeshLoadInfo& load_inf
 }
 
 static void do_mesh_load(ftl::TaskScheduler* scheduler, MeshLoadInfo load_info) {
-	Assimp::Importer importer;
-	constexpr int postprocess = aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals | aiProcess_CalcTangentSpace;
-	aiScene const* scene = importer.ReadFile(std::string(load_info.path), postprocess);
-
-	if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE ||
-		!scene->mRootNode) {
-		throw std::runtime_error("Failed to load model");
-	}
-
-	for (size_t i = 0; i < scene->mNumMeshes; ++i) {
-		// Note that the assimp::Importer destructor takes care of freeing the aiScene
-		load_mesh_data(scheduler, load_info, scene->mMeshes[i]);
-		break;
-	}
+	assetlib::AssetFile file;
+	bool open_success = assetlib::load_binary_file(load_info.path, file);
+	assert(open_success && "Failed to open file");
+	assetlib::MeshInfo info = assetlib::read_mesh_info(file);
+	load_mesh_data(scheduler, load_info, info, file);
 }
 
+/*
 struct ModelLoadInfo {
 	Handle<Model> handle;
 	std::string_view path;
 	Context* ctx;
 };
+*/
 
+/*
 using ModelMaterials = std::vector<Handle<Material>>;
 
 static Handle<Texture> get_texture_if_present(Context& ctx, fs::path const& cwd, aiMaterial* material, aiTextureType type, bool srgb = false) {
@@ -298,7 +260,9 @@ static ModelMaterials load_materials(Context& ctx, fs::path const& cwd, aiScene 
 
 	return materials;
 }
+*/
 
+/*
 struct ModelMeshLoadInfo {
 	Context* ctx;
 	Handle<Mesh> handle;
@@ -395,7 +359,8 @@ static void load_model_mesh(ftl::TaskScheduler* scheduler, ModelMeshLoadInfo loa
 		}
 	);
 }
-
+*/
+/*
 static void process_node(Context& ctx, std::vector<Handle<Mesh>>& meshes, ModelMaterials materials, 
 	Model cur_entity, aiNode const* node, aiScene const* scene) {
 	using namespace components;
@@ -424,7 +389,8 @@ static void process_node(Context& ctx, std::vector<Handle<Mesh>>& meshes, ModelM
 		process_node(ctx, meshes, materials, { child_entity }, node->mChildren[i], scene);
 	}
 }
-
+*/
+/*
 static void do_model_load(ftl::TaskScheduler* scheduler, ModelLoadInfo load_info) {
 	Assimp::Importer* importer = new Assimp::Importer;
 	constexpr int postprocess = aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals | aiProcess_CalcTangentSpace;
@@ -460,10 +426,11 @@ static void do_model_load(ftl::TaskScheduler* scheduler, ModelLoadInfo load_info
 		}
 	);
 }
+*/
 
-Handle<Texture> Context::request_texture(std::string_view path, bool srgb) {
+Handle<Texture> Context::request_texture(std::string_view path) {
 	Handle<Texture> handle = assets::insert_pending<Texture>();
-	tasks->launch(do_texture_load, TextureLoadInfo{ handle, std::string(path), srgb, this });
+	tasks->launch(do_texture_load, TextureLoadInfo{ handle, std::string(path), this });
 	return handle;
 }
 
@@ -501,6 +468,7 @@ Handle<Mesh> Context::request_mesh(float const* vertices, uint32_t size, uint32_
 	return assets::take(std::move(mesh));
 }
 
+/*
 Handle<Model> Context::request_model(std::string_view path) {
 	Handle<Model> handle = assets::insert_pending<Model>();
 	tasks->launch(do_model_load, ModelLoadInfo{ handle, path, this });
@@ -516,5 +484,6 @@ Handle<EnvMap> Context::request_env_map(std::string_view path) {
 		}, std::move(load_info));
 	return handle;
 }
+*/
 
 }

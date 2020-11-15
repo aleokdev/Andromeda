@@ -2,6 +2,7 @@
 set(PHOBOS_NO_FIXED_PIPELINE ON)
 add_subdirectory("phobos")
 add_subdirectory("imgui")
+add_subdirectory("assetlib")
 
 # Allow setting options created with option() through set()
 cmake_policy(SET CMP0077 NEW)
@@ -25,10 +26,11 @@ target_sources(imgui-implementation PRIVATE "imgui/src/imgui_impl_mimas.cpp" "im
 target_link_libraries(imgui-implementation PRIVATE Phobos)
 target_include_directories(imgui-implementation PRIVATE "phobos/include" "imgui/include" "imgui/include/imgui")
 
-target_link_libraries(andromeda PRIVATE Phobos imgui imgui-implementation ftl)
+target_link_libraries(andromeda PRIVATE Phobos imgui imgui-implementation ftl assetlib)
 target_include_directories(andromeda PRIVATE 
 	"phobos/include" 
 	"${CMAKE_CURRENT_SOURCE_DIR}/zlib"
 	"imgui/include"
 	"FiberTaskingLib/include"
+	"assetlib/include"
 )

@@ -2,10 +2,10 @@
 #define ANDROMEDA_RENDERER_RENDER_DATABASE_HPP_
 
 #include <andromeda/util/handle.hpp>
-#include <andromeda/assets/material.hpp>
+//#include <andromeda/assets/material.hpp>
 #include <andromeda/assets/texture.hpp>
 #include <andromeda/assets/mesh.hpp>
-#include <andromeda/assets/env_map.hpp>
+//#include <andromeda/assets/env_map.hpp>
 
 #include <phobos/util/image_util.hpp>
 #include <phobos/renderer/meta.hpp>
@@ -21,7 +21,7 @@ namespace renderer {
 
 struct Draw {
 	Handle<Mesh> mesh;
-	Handle<Material> material;
+//	Handle<Material> material;
 	glm::mat4 transform;
 };
 
@@ -30,7 +30,7 @@ class RenderDatabase {
 public:
 	// Adds a material to the render database. All used materials in the drawcalls must be registered with this function in order to be valid.
 	// Not registering a material may result in wrong textures being used, or even application crashes.
-	void add_material(Handle<Material> handle);
+//	void add_material(Handle<Material> handle);
 	void add_draw(Draw const& draw);
 	void add_point_light(glm::vec3 const& position, float radius, glm::vec3 const& color, float intensity);
 
@@ -44,7 +44,7 @@ public:
 		uint32_t ambient_occlusion = 0;
 	};
 
-	TextureIndices get_material_textures(Handle<Material> handle);
+//	TextureIndices get_material_textures(Handle<Material> handle);
 
 	// These are not meant for modifying manually. Use the provided add_X functions for that. The only reason these are public is because
 	// you can't friend a lambda and getters are ugly.
@@ -75,7 +75,7 @@ public:
 	std::unordered_map<uint32_t, uint32_t> texture_map;
 	struct InternalDraw {
 		Handle<Mesh> mesh;
-		Handle<Material> material;
+//		Handle<Material> material;
 	};
 	std::vector<InternalDraw> draws;
 	std::vector<glm::mat4> transforms;
@@ -85,7 +85,7 @@ public:
 	glm::mat4 projection_view;
 	glm::vec3 camera_position;
 
-	Handle<EnvMap> environment_map;
+//	Handle<EnvMap> environment_map;
 
 	// Stores point lights in a format ready to send to the shader (all data packed together)
 	struct alignas(2 * sizeof(glm::vec4)) InternalPointLight {

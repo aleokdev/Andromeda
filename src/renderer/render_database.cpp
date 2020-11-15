@@ -5,6 +5,7 @@
 
 namespace andromeda::renderer {
 
+/*
 void RenderDatabase::add_material(Handle<Material> handle) {
 	// Add all textures for this material to the database
 	Material* material = assets::get(handle);
@@ -15,9 +16,10 @@ void RenderDatabase::add_material(Handle<Material> handle) {
 	add_texture(material->roughness);
 	add_texture(material->ambient_occlusion);
 }
+*/
 
 void RenderDatabase::add_draw(Draw const& draw) {
-	draws.push_back(InternalDraw{ .mesh = draw.mesh, .material = draw.material });
+	draws.push_back(InternalDraw{ .mesh = draw.mesh, /* .material = draw.material */});
 	transforms.push_back(draw.transform);
 }
 
@@ -57,6 +59,7 @@ void RenderDatabase::reset() {
 	texture_views[default_ambient_occlusion_index] = default_ambient_occlusion;
 }
 
+/*
 RenderDatabase::TextureIndices RenderDatabase::get_material_textures(Handle<Material> handle) {
 	Material* material = assets::get(handle);
 	STL_ASSERT(material, "Invalid material handle");
@@ -68,5 +71,6 @@ RenderDatabase::TextureIndices RenderDatabase::get_material_textures(Handle<Mate
 		.ambient_occlusion = material->ambient_occlusion ? texture_map[material->ambient_occlusion.id] : default_ambient_occlusion_index
 	};
 }
+*/
 
 }

@@ -7,7 +7,6 @@
 #include <phobos/core/vulkan_context.hpp>
 
 #include <andromeda/assets/assets.hpp>
-#include <andromeda/assets/importers/stb_image.h>
 #include <andromeda/assets/texture.hpp>
 #include <andromeda/components/static_mesh.hpp>
 #include <andromeda/components/camera.hpp>
@@ -22,6 +21,8 @@
 #include <imgui/imgui_impl_mimas.h>
 
 #include <glm/glm.hpp>
+
+#include <andromeda/renderer/basic/basic_renderer.hpp>
 
 namespace andromeda::wsi {
 
@@ -50,7 +51,7 @@ Application::Application(size_t width, size_t height, std::string_view title)
 	context.vulkan = std::unique_ptr<ph::VulkanContext>(ph::create_vulkan_context(*window.handle(), &io::get_console_logger(), settings));
 	context.world = std::make_unique<world::World>();
 	context.tasks = std::make_unique<TaskManager>();
-	context.envmap_loader = std::make_unique<EnvMapLoader>(*context.vulkan);
+//	context.envmap_loader = std::make_unique<EnvMapLoader>(*context.vulkan);
 
 	// Initialize imgui
 	IMGUI_CHECKVERSION();
@@ -65,7 +66,8 @@ Application::Application(size_t width, size_t height, std::string_view title)
 	ImGui_ImplPhobos_Init(&init_info);
 	io.Fonts->AddFontDefault();
 	load_imgui_fonts(*context.vulkan);
-	renderer = std::make_unique<renderer::ForwardPlusRenderer>(context);
+//	renderer = std::make_unique<renderer::ForwardPlusRenderer>(context);
+	renderer = std::make_unique<renderer::BasicRenderer>(context);
 }
 
 Application::~Application() {
@@ -80,11 +82,13 @@ void Application::run() {
 	using namespace components;
 
 	ecs::entity_t cam = context.world->create_entity();
+	/*
 	Handle<EnvMap> env_maps[2] = {
 		{}, {}
 	};
 	env_maps[0] = context.request_env_map("data/envmaps/the_lost_city_4k.hdr");
 	uint32_t envmap_idx = 0;
+	*/
 	// Make camera look at the center of the scene
 	{
 		auto& cam_data = context.world->ecs().add_component<Camera>(cam);
@@ -117,7 +121,14 @@ void Application::run() {
 		light_trans.position = glm::vec3(rand() % 100 - 50, rand() % 30, rand() % 40 - 20);
 	}
 
-	context.request_model("data/models/sponza-gltf-pbr/sponza.glb");
+//	context.request_model("data/models/sponza-gltf-pbr/sponza.glb");
+
+	Handle<Mesh> mesh = context.request_mesh("data/meshes/teapot.mesh");
+	ecs::entity_t ent = context.world->create_entity();
+	auto& m = context.world->ecs().add_component<StaticMesh>(ent);
+	m.mesh = mesh;
+	context.world->ecs().add_component<MeshRenderer>(ent);
+	context.world->ecs().get_component<Transform>(ent).scale = glm::vec3(0.01, 0.01, 0.01);
 
 	double time = mimas_get_time();
 	double last_time = time;
@@ -188,13 +199,16 @@ void Application::run() {
 			};
 
 			ImGui::DragFloat3("cam rotation", &cam_transform.rotation.x, 1.0f);
-			if (ImGui::Button("Toggle envmap")) {
+/*			if (ImGui::Button("Toggle envmap")) {
 				envmap_idx++;
 				envmap_idx %= 2;
 			}
-			cam_data.env_map = env_maps[envmap_idx];
+			*/
+//			cam_data.env_map = env_maps[envmap_idx];
 			ImGui::Text("frame time: %f ms", delta_time * 1000.0);
 			ImGui::Text("fps: %d", (int)(1.0 / delta_time));
+
+			cam_transform.position = glm::vec3(2, 0, 2);
 		}
 		ImGui::End();
 

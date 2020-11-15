@@ -61,7 +61,7 @@ Renderer::Renderer(Context& ctx) {
 
 	render_size = { 1920, 1080 };
 
-	color_final = &vk_present->add_color_attachment("color_final", render_size);
+	color_final = &vk_present->add_color_attachment("color_final", render_size, vk::Format::eR8G8B8A8Unorm);
 	attachments.push_back(color_final);
 
 	default_textures.push_back(create_single_color_texture(*ctx.vulkan, 255, 0, 255, vk::Format::eR8G8B8A8Srgb)); // color
@@ -111,14 +111,14 @@ void Renderer::render(Context& ctx) {
 		database.view = glm::lookAt(trans.position, trans.position + cam.front, cam.up);
 		database.projection_view = database.projection * database.view;
 		database.camera_position = trans.position;
-		database.environment_map = cam.env_map;
+//		database.environment_map = cam.env_map;
 		break;
 	}
 
 	// For now, we populate the render database with all loaded materials. Later, we can improve this to only include used materials
-	for (auto const& [id, _] : assets::storage::data<Material>) {
-		database.add_material(Handle<Material>{ id });
-	}
+//	for (auto const& [id, _] : assets::storage::data<Material>) {
+//		database.add_material(Handle<Material>{ id });
+//	}
 
 	for (auto const& [transform, rend, mesh] : ctx.world->ecs().view<Transform, MeshRenderer, StaticMesh>()) {
 		// Calculate model matrix from transformation
@@ -129,7 +129,7 @@ void Renderer::render(Context& ctx) {
 			glm::radians(transform.rotation.z) 
 		});
 		model = glm::scale(model, transform.scale);
-		database.add_draw(renderer::Draw{ .mesh = mesh.mesh, .material = rend.material, .transform = model });
+		database.add_draw(renderer::Draw{ .mesh = mesh.mesh, /*.material = rend.material,*/ .transform = model });
 	}
 
 	for (auto const& [trans, light] : ctx.world->ecs().view<Transform, PointLight>()) {
